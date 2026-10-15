@@ -15,20 +15,16 @@ from dotenv import load_dotenv
 from numpy import dot, mean, array
 from numpy.linalg import norm
 
-# Cargar variables de entorno
 load_dotenv()
 
-# Descargar paquetes de tokenización de forma segura
 try:
     nltk.download('punkt', quiet=True)
     nltk.download('punkt_tab', quiet=True)
 except Exception as e:
     print(f"⚠️ Aviso NLTK: {e}")
 
-# Inicializar la API
 app = FastAPI(title="ICA Cognitive Metrics API")
 
-# 1. BLINDAJE CORS: Permitir peticiones desde ica-observatory.com y localhost
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -37,7 +33,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Credenciales
 SUPABASE_URL = os.getenv("NEXT_PUBLIC_SUPABASE_URL") or os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("NEXT_PUBLIC_SUPABASE_ANON_KEY")
 HF_TOKEN = os.getenv("HUGGINGFACE_TOKEN")
@@ -48,8 +43,6 @@ if SUPABASE_URL and SUPABASE_KEY:
         supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
     except Exception as e:
         print(f"⚠️ Error inicializando Supabase: {e}")
-else:
-    print("⚠️ Faltan credenciales de Supabase en variables de entorno")
 
 
 class SessionData(BaseModel):
@@ -59,7 +52,6 @@ class SessionData(BaseModel):
 
 
 def safe_tokenize(text: str) -> list[str]:
-    """Tokenizador con respaldo regex que nunca falla."""
     if not text or not text.strip():
         return []
     try:
@@ -86,7 +78,6 @@ def calculate_lexical_diversity(text: str) -> float:
 
 
 def count_epistemic_markers(text: str) -> int:
-    """Detecta marcadores de incertidumbre, matiz y metacognición (multilingüe base)."""
     markers = {
         "quizás", "quizas", "tal", "vez", "posiblemente", "depende", "incertidumbre",
         "duda", "parece", "podría", "podria", "asumí", "asumi", "cambié", "cambie",
@@ -99,24 +90,20 @@ def count_epistemic_markers(text: str) -> int:
 
 
 def count_new_relations(text1: str, text5: str) -> int:
-    """Cuenta cuántos conceptos sustantivos nuevos integró el sujeto en la Fase 5 vs Fase 1."""
     t1 = set(w for w in safe_tokenize(text1) if len(w) > 4)
     t5 = set(w for w in safe_tokenize(text5) if len(w) > 4)
     return len(t5 - t1)
 
 
 def local_lexical_cosine_shift(text1: str, text5: str) -> float:
-    """Respaldo determinista local si la API externa de Hugging Face está inactiva."""
     tokens1 = safe_tokenize(text1)
     tokens5 = safe_tokenize(text5)
     if not tokens1 or not tokens5:
         return 0.35
-
     vocab = list(set(tokens1 + tokens5))
     c1, c5 = Counter(tokens1), Counter(tokens5)
     v1 = array([c1.get(w, 0) for w in vocab], dtype=float)
     v5 = array([c5.get(w, 0) for w in vocab], dtype=float)
-
     denom = norm(v1) * norm(v5)
     if denom == 0:
         return 0.35
@@ -125,7 +112,6 @@ def local_lexical_cosine_shift(text1: str, text5: str) -> float:
 
 
 def ensure_1d_vector(vec) -> list[float]:
-    """Garantiza que el embedding sea un vector 1D aunque HF devuelva matriz de tokens."""
     arr = array(vec, dtype=float)
     if arr.ndim == 2:
         arr = mean(arr, axis=0)
@@ -133,10 +119,8 @@ def ensure_1d_vector(vec) -> list[float]:
 
 
 def calculate_semantic_shift(text1: str, text5: str) -> float:
-    """Intenta usar Hugging Face; si falla o tarda, usa respaldo vectorial local sin error 500."""
     if not text1.strip() or not text5.strip():
         return 0.35
-
     if HF_TOKEN:
         api_url = "https://api-inference.huggingface.co/pipeline/feature-extraction/sentence-transformers/paraphrase-MiniLM-L6-v2"
         headers = {"Authorization": f"Bearer {HF_TOKEN}"}
@@ -163,35 +147,49 @@ def calculate_semantic_shift(text1: str, text5: str) -> float:
                     break
         except Exception as e:
             print(f"⚠️ Aviso HF API (usando cálculo vectorial local): {e}")
-
     return local_lexical_cosine_shift(text1, text5)
 
 
-def calculate_smith_chart(entropy_val: float, semantic_shift: float) -> dict:
+def classify_cognitive_zone(r_c: float, x_c: float, gamma_mag: float) -> dict:
     """
-    CAPA 13: Mapeo Conforme del Cuadro de Smith Cognitivo.
-    Transforma Entropía (H) y Desplazamiento Semántico (Ds) al Disco Unitario Complejo.
+    EL ÚLTIMO DOBLE CIEGO: Clasificador determinista que traduce las coordenadas
+    complejas del Cuadro de Smith en categorías cognitivas legibles por el usuario.
     """
-    H_0 = 3.5  # Equilibrio epistémico de referencia (bits)
-    D_0 = 0.35 # Umbral de actualización moderada
+    if gamma_mag <= 0.32:
+        zone_type = "balanced"
+    elif x_c >= 0:
+        zone_type = "inductive"
+    else:
+        zone_type = "capacitive"
 
-    # 1. Impedancia Cognitiva Normalizada: z_c = r_c + j*x_c
+    counterpart_zone = "balanced" if zone_type == "balanced" else ("capacitive" if zone_type == "inductive" else "inductive")
+
+    return {
+        "zone_type": zone_type,
+        "counterpart_zone": counterpart_zone,
+        "assimilation_pct": round((1.0 - gamma_mag) * 100, 1),
+        "friction_level": "baja" if gamma_mag <= 0.30 else ("moderada" if gamma_mag <= 0.60 else "alta"),
+    }
+
+
+def calculate_smith_chart(entropy_val: float, semantic_shift: float) -> dict:
+    H_0 = 3.5
+    D_0 = 0.35
+
     r_c = H_0 / (max(entropy_val, 0.0) + 0.1)
     x_c = 2.0 * (D_0 - semantic_shift)
 
-    # 2. Coeficiente de Reflexión Complejo (Gamma = u + j*v)
     denom = ((r_c + 1.0) ** 2) + (x_c ** 2)
     gamma_u = ((r_c ** 2) + (x_c ** 2) - 1.0) / denom
     gamma_v = (2.0 * x_c) / denom
     gamma_mag = min(0.99, math.sqrt((gamma_u ** 2) + (gamma_v ** 2)))
-
-    # 3. Relación de Onda Estacionaria Cognitiva (VSWR_c)
     vswr_c = (1.0 + gamma_mag) / (1.0 - gamma_mag)
 
-    # 4. Contraparte Ideológica Hipotética (Cálculo de Admitancia: rotación de 180 grados)
     denom_adm = (r_c ** 2) + (x_c ** 2)
     g_c = (r_c / denom_adm) if denom_adm > 0 else 1.0
     b_c = (-x_c / denom_adm) if denom_adm > 0 else 0.0
+
+    interpretation = classify_cognitive_zone(r_c, x_c, gamma_mag)
 
     return {
         "impedance_r": round(r_c, 4),
@@ -206,33 +204,30 @@ def calculate_smith_chart(entropy_val: float, semantic_shift: float) -> dict:
             "susceptance_b": round(b_c, 4),
             "counterpart_u": round(-gamma_u, 4),
             "counterpart_v": round(-gamma_v, 4),
-        }
+        },
+        "cognitive_interpretation": interpretation
     }
 
 
 @app.get("/")
 async def health_check():
-    return {"status": "online", "service": "ICA Cognitive Metrics API v2.0 (Smith Chart Enabled)"}
+    return {"status": "online", "service": "ICA Cognitive Metrics API v2.1 (Double-Blind & Longitudinal Smith)"}
 
 
 @app.post("/api/analyze")
 async def analyze_metrics(data: SessionData):
-    # Nunca lanza HTTPException 500: garantiza continuidad total de la experiencia
     try:
         p1 = data.phase_1_text or ""
         p5 = data.phase_5_text or ""
 
-        # 1. Métricas base de Teoría de la Información y NLP
         entropy_val = calculate_shannon_entropy(p5)
         lex_div = calculate_lexical_diversity(p5)
         semantic_shift = calculate_semantic_shift(p1, p5)
         epistemic_cnt = count_epistemic_markers(p5)
         new_rel_cnt = count_new_relations(p1, p5)
 
-        # 2. Mapeo en el Cuadro de Smith Cognitivo (Capa 13)
         smith_data = calculate_smith_chart(entropy_val, semantic_shift)
 
-        # 3. Payload exacto para las columnas de `ica_derived_metrics` en Supabase
         metric_data = {
             "session_id": data.session_id,
             "transfer_overlap": smith_data["assimilation_index"],
@@ -247,26 +242,29 @@ async def analyze_metrics(data: SessionData):
         if supabase:
             try:
                 supabase.table("ica_derived_metrics").insert(metric_data).execute()
-                print(f"✓ Métricas guardadas en ica_derived_metrics para {data.session_id}")
             except Exception as db_err:
-                print(f"⚠️ Error guardando en Supabase (no bloqueante): {db_err}")
+                print(f"⚠️ Error guardando en Supabase: {db_err}")
 
         return {
             "success": True,
             "metrics": metric_data,
             "smith_chart": smith_data
         }
-
     except Exception as e:
         print(f"⚠️ Error recuperado en /api/analyze: {e}")
-        fallback_metrics = {
-            "session_id": data.session_id,
-            "transfer_overlap": 0.72,
-            "integration_density": 0.65,
-            "prediction_error": 3.2,
-            "semantic_shift": 0.35,
-            "epistemic_markers": 1,
-            "new_relations": 3,
-            "quality_flag_short": False
+        fallback_smith = calculate_smith_chart(3.2, 0.35)
+        return {
+            "success": True,
+            "metrics": {
+                "session_id": data.session_id,
+                "transfer_overlap": fallback_smith["assimilation_index"],
+                "integration_density": 0.65,
+                "prediction_error": 3.2,
+                "semantic_shift": 0.35,
+                "epistemic_markers": 1,
+                "new_relations": 3,
+                "quality_flag_short": False
+            },
+            "smith_chart": fallback_smith,
+            "recovered": True
         }
-        return {"success": True, "metrics": fallback_metrics, "recovered": True}
